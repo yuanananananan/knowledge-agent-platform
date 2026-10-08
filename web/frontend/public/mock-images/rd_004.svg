@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+  <rect width="100%" height="100%" fill="#052e16"/>
+  <g opacity="0.85">
+    <circle cx="160" cy="260" r="60" fill="#4ade80"/>
+    <circle cx="320" cy="320" r="90" fill="#22c55e"/>
+    <circle cx="520" cy="260" r="70" fill="#16a34a"/>
+    <circle cx="640" cy="360" r="110" fill="#166534"/>
+  </g>
+  <text x="50%" y="90%" dominant-baseline="middle" text-anchor="middle" font-size="40" fill="#bbf7d0" font-family="Arial, Helvetica, sans-serif">RD 004</text>
+</svg>

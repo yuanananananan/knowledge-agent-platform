@@ -1,0 +1,376 @@
+services:
+  mysql:
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --transaction-isolation=READ-COMMITTED
+    environment:
+      MYSQL_DATABASE: embedded_software
+      MYSQL_USER: knowledge
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-knowledge-dev-password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-knowledge-root-password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-knowledge-root-password}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:-knowledge-redis-password}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-knowledge-redis-password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:4.1.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  kafka-init:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic "${KAFKA_TOPIC:-agent-events}" --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic "${EXPERIMENT_KAFKA_TOPIC:-experiment-events}" --partitions 3 --replication-factor 1
+
+  rag-cache:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${RAG_CACHE_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${RAG_CACHE_REDIS_PASSWORD:-knowledge-cache-password}
+    environment:
+      REDIS_PASSWORD: ${RAG_CACHE_REDIS_PASSWORD:-knowledge-cache-password}
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  bootstrap:
+    # PyTorch 1.13 wheels used by the legacy training stack are x86_64-only.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "-m", "app.bootstrap"]
+    environment:
+      DATABASE_URL: mysql+pymysql://knowledge:${MYSQL_PASSWORD:-knowledge-dev-password}@mysql:3306/embedded_software
+      SECRET_KEY: ${SECRET_KEY:-replace-this-development-secret}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-chat}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-20}
+      CONTROL_PLANE_URL: http://control-plane:8080
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:-local-auth-secret}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-local-control-plane-token}
+      RAG_CACHE_REDIS_URL: redis://:${RAG_CACHE_REDIS_PASSWORD:-knowledge-cache-password}@rag-cache:6379/0
+      RAG_SEARCH_BACKEND: opensearch
+      RAG_OPENSEARCH_URL: http://opensearch:9200
+      RAG_OPENSEARCH_INDEX: ${RAG_OPENSEARCH_INDEX:-knowledge-rag}
+      RAG_RETRIEVAL_CANDIDATES: ${RAG_RETRIEVAL_CANDIDATES:-100}
+      RAG_HNSW_M: ${RAG_HNSW_M:-16}
+      RAG_HNSW_EF_CONSTRUCTION: ${RAG_HNSW_EF_CONSTRUCTION:-100}
+      HF_HOME: /root/.cache/huggingface
+      RAG_MODEL_LOCAL_FILES_ONLY: "false"
+      RAG_SEARCH_CACHE_TTL_SECONDS: ${RAG_SEARCH_CACHE_TTL_SECONDS:-300}
+      RAG_EMBEDDING_CACHE_TTL_SECONDS: ${RAG_EMBEDDING_CACHE_TTL_SECONDS:-2592000}
+      RAG_CACHE_TTL_JITTER_SECONDS: ${RAG_CACHE_TTL_JITTER_SECONDS:-60}
+      RAG_CACHE_FAILURE_BACKOFF_SECONDS: ${RAG_CACHE_FAILURE_BACKOFF_SECONDS:-5}
+      DATASET_QUALITY_CACHE_TTL_SECONDS: ${DATASET_QUALITY_CACHE_TTL_SECONDS:-600}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_DEDUP_REDIS_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/1
+      CELERY_DEDUP_LOCK_TTL_SECONDS: ${CELERY_DEDUP_LOCK_TTL_SECONDS:-90}
+      CELERY_VISIBILITY_TIMEOUT: ${CELERY_VISIBILITY_TIMEOUT:-172800}
+      CELERY_RESULT_EXPIRES: ${CELERY_RESULT_EXPIRES:-86400}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+
+  worker:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["celery", "-A", "app.utils.run_celery_worker.celery_app", "worker", "--pool=threads", "--loglevel=info", "--queues=training,validation,nas,evaluation"]
+    environment:
+      DATABASE_URL: mysql+pymysql://knowledge:${MYSQL_PASSWORD:-knowledge-dev-password}@mysql:3306/embedded_software
+      SECRET_KEY: ${SECRET_KEY:-replace-this-development-secret}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-chat}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_DEDUP_REDIS_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/1
+      RAG_CACHE_REDIS_URL: redis://:${RAG_CACHE_REDIS_PASSWORD:-knowledge-cache-password}@rag-cache:6379/0
+      RAG_SEARCH_BACKEND: opensearch
+      RAG_OPENSEARCH_URL: http://opensearch:9200
+      RAG_OPENSEARCH_INDEX: ${RAG_OPENSEARCH_INDEX:-knowledge-rag}
+      RAG_RETRIEVAL_CANDIDATES: ${RAG_RETRIEVAL_CANDIDATES:-100}
+      HF_HOME: /root/.cache/huggingface
+      RAG_MODEL_LOCAL_FILES_ONLY: "false"
+      CELERY_DEDUP_LOCK_TTL_SECONDS: ${CELERY_DEDUP_LOCK_TTL_SECONDS:-90}
+      CELERY_VISIBILITY_TIMEOUT: ${CELERY_VISIBILITY_TIMEOUT:-172800}
+      CELERY_RESULT_EXPIRES: ${CELERY_RESULT_EXPIRES:-86400}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
+
+  agent-grpc:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "-m", "app.grpc_server"]
+    environment:
+      DATABASE_URL: mysql+pymysql://knowledge:${MYSQL_PASSWORD:-knowledge-dev-password}@mysql:3306/embedded_software
+      SECRET_KEY: ${SECRET_KEY:-replace-this-development-secret}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-local-control-plane-token}
+      AGENT_GRPC_ADDRESS: 0.0.0.0:50051
+      AGENT_GRPC_MAX_WORKERS: ${AGENT_GRPC_MAX_WORKERS:-8}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-chat}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-20}
+      RAG_CACHE_REDIS_URL: redis://:${RAG_CACHE_REDIS_PASSWORD:-knowledge-cache-password}@rag-cache:6379/0
+      RAG_SEARCH_BACKEND: opensearch
+      RAG_OPENSEARCH_URL: http://opensearch:9200
+      RAG_OPENSEARCH_INDEX: ${RAG_OPENSEARCH_INDEX:-knowledge-rag}
+      RAG_RETRIEVAL_CANDIDATES: ${RAG_RETRIEVAL_CANDIDATES:-100}
+      RAG_HNSW_M: ${RAG_HNSW_M:-16}
+      RAG_HNSW_EF_CONSTRUCTION: ${RAG_HNSW_EF_CONSTRUCTION:-100}
+      HF_HOME: /root/.cache/huggingface
+      RAG_MODEL_LOCAL_FILES_ONLY: "false"
+      RAG_SEARCH_CACHE_TTL_SECONDS: ${RAG_SEARCH_CACHE_TTL_SECONDS:-300}
+      RAG_EMBEDDING_CACHE_TTL_SECONDS: ${RAG_EMBEDDING_CACHE_TTL_SECONDS:-2592000}
+      RAG_CACHE_TTL_JITTER_SECONDS: ${RAG_CACHE_TTL_JITTER_SECONDS:-60}
+      RAG_CACHE_FAILURE_BACKOFF_SECONDS: ${RAG_CACHE_FAILURE_BACKOFF_SECONDS:-5}
+      DATASET_QUALITY_CACHE_TTL_SECONDS: ${DATASET_QUALITY_CACHE_TTL_SECONDS:-600}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      CELERY_DEDUP_REDIS_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/1
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rag-cache:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; c=grpc.insecure_channel('127.0.0.1:50051'); grpc.channel_ready_future(c).result(timeout=2); c.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  control-plane:
+    build:
+      context: ./services/go-control-plane
+      dockerfile: Dockerfile
+    environment:
+      CONTROL_PLANE_DATABASE_DSN: knowledge:${MYSQL_PASSWORD:-knowledge-dev-password}@tcp(mysql:3306)/embedded_software?parseTime=true&charset=utf8mb4&timeout=5s&readTimeout=5s&writeTimeout=5s
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:-local-auth-secret}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-local-control-plane-token}
+      PYTHON_AGENT_GRPC_TARGET: agent-grpc:50051
+      REDIS_URL: redis://:${REDIS_PASSWORD:-knowledge-redis-password}@redis:6379/0
+      REDIS_LOCK_PREFIX: "knowledge-agent:lock:"
+      REDIS_LOCK_TTL: ${REDIS_LOCK_TTL:-90s}
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-agent-events}
+      CONTROL_PLANE_WORKER_CONCURRENCY: ${CONTROL_PLANE_WORKER_CONCURRENCY:-4}
+      CONTROL_PLANE_PYTHON_TIMEOUT: ${CONTROL_PLANE_PYTHON_TIMEOUT:-90s}
+      CONTROL_PLANE_RUN_LEASE: ${CONTROL_PLANE_RUN_LEASE:-90s}
+      CONTROL_PLANE_WORKER_RUN_TIMEOUT: ${CONTROL_PLANE_WORKER_RUN_TIMEOUT:-10m}
+    ports:
+      - "8081:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      agent-grpc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/control-plane", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  business-api:
+    build:
+      context: ./services/go-business-api
+      dockerfile: Dockerfile
+    environment:
+      BUSINESS_DATABASE_DSN: knowledge:${MYSQL_PASSWORD:-knowledge-dev-password}@tcp(mysql:3306)/embedded_software?parseTime=true&charset=utf8mb4&timeout=5s&readTimeout=5s&writeTimeout=5s
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-local-control-plane-token}
+      CONTROL_PLANE_URL: http://control-plane:8080
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:-local-auth-secret}
+      PYTHON_AGENT_GRPC_TARGET: agent-grpc:50051
+      BUSINESS_PYTHON_TIMEOUT: ${BUSINESS_PYTHON_TIMEOUT:-2m}
+      KAFKA_BROKERS: kafka:29092
+      EXPERIMENT_KAFKA_TOPIC: ${EXPERIMENT_KAFKA_TOPIC:-experiment-events}
+      EXPERIMENT_KAFKA_CONSUMER_GROUP: ${EXPERIMENT_KAFKA_CONSUMER_GROUP:-experiment-audit}
+      FRONTEND_ORIGIN: http://localhost:5173
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      BUSINESS_DATA_ROOT: /app/data
+      BUSINESS_LOG_ROOT: /app/logs
+      BUSINESS_CONFIG_ROOT: /app/configs
+      BUSINESS_EVAL_ROOT: /app/evals
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./configs:/app/configs:ro
+      - ./evals:/app/evals:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      agent-grpc:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/business-api", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./web/frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+        VITE_API_TIMEOUT: ${VITE_API_TIMEOUT:-30000}
+    ports:
+      - "5173:80"
+    depends_on:
+      business-api:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  redis_data:
+  kafka_data:
+  opensearch_data:
+  huggingface_cache:

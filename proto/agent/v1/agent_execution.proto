@@ -1,0 +1,178 @@
+// 文件用途：定义 Go 服务与 Python Agent 之间的私有 gRPC 接口、请求、响应和流事件协议。
+syntax = "proto3";
+
+// Protobuf 包名用于隔离 Agent v1 协议，后续不兼容升级可以新增 v2。
+package knowledge_agent.agent.v1;
+
+// 指定生成 Go 代码时的导入路径和包别名 agentv1。
+option go_package = "knowledge-agent/contracts/agent/v1;agentv1";
+
+// AgentExecutionService 是 Go Control Plane/Business API 与 Python Agent 之间的私有服务边界。
+service AgentExecutionService {
+  // ExecuteRun 执行一次非流式 Agent 推理，调用方等待最终答案。
+  rpc ExecuteRun(ExecuteRunRequest) returns (ExecuteRunResponse);
+  // ExecuteRunStream 使用服务端流持续返回模型增量、工具、工作流和终态事件。
+  rpc ExecuteRunStream(ExecuteRunRequest) returns (stream RunEvent);
+  // ExecuteAction 执行已经通过人工审批的业务写操作。
+  rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
+  // ValidateAction 在提案持久化前校验并规范化动作参数。
+  rpc ValidateAction(ValidateActionRequest) returns (ValidateActionResponse);
+  // DispatchCompute 将已持久化的训练、验证、NAS 或评测任务派发给 Celery。
+  rpc DispatchCompute(DispatchComputeRequest) returns (DispatchComputeResponse);
+  // Knowledge 调用 Python RAG 引擎执行状态查询、检索或重建索引。
+  rpc Knowledge(KnowledgeRequest) returns (KnowledgeResponse);
+  // RenderImage 将可信数据文件转换成浏览器可以展示的图片。
+  rpc RenderImage(RenderImageRequest) returns (RenderImageResponse);
+  // CancelCompute 请求 Celery 撤销或终止指定后台计算任务。
+  rpc CancelCompute(CancelComputeRequest) returns (CancelComputeResponse);
+  // Check 返回 Python Agent gRPC 服务的健康状态。
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ExecuteRunRequest 描述一次 Agent 对话轮次。
+message ExecuteRunRequest {
+  // run_id 是由 Control Plane 生成的全局运行标识，用于幂等和追踪。
+  string run_id = 1;
+  // conversation_id 标识需要加载和更新的持久化会话。
+  string conversation_id = 2;
+  // user_id 是已经由 Go 层认证的用户标识，用于数据权限隔离。
+  int64 user_id = 3;
+  // message 是当前轮次的用户输入。
+  string message = 4;
+}
+
+// ExecuteRunResponse 是非流式 Agent 执行的最终结果。
+message ExecuteRunResponse {
+  // answer 是最终助手回答。
+  string answer = 1;
+  // conversation_id 返回实际使用的会话标识，允许服务端补建新会话。
+  string conversation_id = 2;
+  // metadata_json 保存可扩展的结构化运行元数据，使用 UTF-8 JSON 字节编码。
+  bytes metadata_json = 3;
+}
+
+// RunEvent 是 Python 向 Control Plane 发送的私有事件信封。
+// Control Plane 持久化时会重新分配自己的可靠 sequence；这里的 sequence 只供直接或本地消费者使用。
+message RunEvent {
+  // run_id 标识该事件属于哪一次运行。
+  string run_id = 1;
+  // sequence 是 Python 执行进程内产生的递增序号，不作为最终数据库游标。
+  int64 sequence = 2;
+  // type 是事件类型，例如 model.delta、tool.completed 或 run.completed。
+  string type = 3;
+  // payload_json 是与事件类型对应的 UTF-8 JSON 数据。
+  bytes payload_json = 4;
+  // terminal 表示该事件是否结束整次 run。
+  bool terminal = 5;
+}
+
+// ExecuteActionRequest 描述一项已经获准执行的业务动作。
+message ExecuteActionRequest {
+  // user_id 用于动作执行期间的资源归属和权限检查。
+  int64 user_id = 1;
+  // action_type 指定动作类型，例如创建训练任务。
+  string action_type = 2;
+  // payload_json 是已经过验证的动作参数 JSON。
+  bytes payload_json = 3;
+  // reason 记录执行该动作的业务理由，供审计使用。
+  string reason = 4;
+  // idempotency_key 防止网络重试导致重复业务副作用。
+  string idempotency_key = 5;
+}
+
+// ExecuteActionResponse 返回动作执行产生的结构化结果。
+message ExecuteActionResponse {
+  // result_json 是 UTF-8 JSON 编码的业务执行结果。
+  bytes result_json = 1;
+}
+
+// ValidateActionRequest 请求 Python 对动作参数执行领域校验。
+message ValidateActionRequest {
+  // user_id 用于验证请求引用的数据是否属于当前用户。
+  int64 user_id = 1;
+  // action_type 决定使用哪套动作 Schema 和校验逻辑。
+  string action_type = 2;
+  // payload_json 是尚未进入审批表的原始参数。
+  bytes payload_json = 3;
+}
+
+// ValidateActionResponse 返回规范化参数和面向审批人的影响说明。
+message ValidateActionResponse {
+  // payload_json 是完成默认值填充和格式规范化后的参数。
+  bytes payload_json = 1;
+  // impact 描述动作可能产生的业务影响。
+  string impact = 2;
+}
+
+// DispatchComputeRequest 描述一项已在业务数据库落库的后台计算任务。
+message DispatchComputeRequest {
+  // task_type 区分 training、validation、nas 和 agent_evaluation。
+  string task_type = 1;
+  // record_id 是对应业务表记录的数据库主键。
+  int64 record_id = 2;
+  // task_id 是稳定的 Celery 任务 ID，用于幂等派发和取消。
+  string task_id = 3;
+  // payload_json 保存不同任务类型需要的可选扩展参数。
+  bytes payload_json = 4;
+}
+
+// DispatchComputeResponse 表示 Python/Celery 是否接受了派发请求。
+message DispatchComputeResponse {
+  // task_id 回显实际派发的稳定任务 ID。
+  string task_id = 1;
+  // status 是 accepted 等派发状态，不代表计算已经完成。
+  string status = 2;
+}
+
+// KnowledgeRequest 描述一次知识库操作。
+message KnowledgeRequest {
+  // operation 是 status、search 或 rebuild。
+  string operation = 1;
+  // payload_json 保存查询文本、top_k、过滤器等操作参数。
+  bytes payload_json = 2;
+}
+
+// KnowledgeResponse 返回知识库操作的结构化结果。
+message KnowledgeResponse {
+  // result_json 是 UTF-8 JSON 编码的状态、命中项或重建结果。
+  bytes result_json = 1;
+}
+
+// RenderImageRequest 指定需要由 Python 解码或转换的数据文件。
+message RenderImageRequest {
+  // path 必须是 Go 层已经验证过的可信本地路径。
+  string path = 1;
+}
+
+// RenderImageResponse 返回可以直接通过 HTTP 响应发送的图片。
+message RenderImageResponse {
+  // content 是完整图片二进制内容。
+  bytes content = 1;
+  // content_type 是 image/png 等 MIME 类型。
+  string content_type = 2;
+  // filename 是建议返回给浏览器的文件名。
+  string filename = 3;
+}
+
+// CancelComputeRequest 描述需要撤销的 Celery 任务。
+message CancelComputeRequest {
+  // task_id 是派发计算时使用的稳定任务 ID。
+  string task_id = 1;
+  // terminate 表示是否要求终止已经开始执行的 Worker 任务。
+  bool terminate = 2;
+}
+
+// CancelComputeResponse 表示撤销命令是否已被 Celery 控制面接受。
+message CancelComputeResponse {
+  // accepted 只表示撤销请求已接受，不保证业务任务已经停止。
+  bool accepted = 1;
+}
+
+// HealthCheckRequest 为空，因为健康检查不需要业务参数。
+message HealthCheckRequest {}
+
+// HealthCheckResponse 返回 Python gRPC 服务当前状态。
+message HealthCheckResponse {
+  // status 正常情况下为 serving。
+  string status = 1;
+}

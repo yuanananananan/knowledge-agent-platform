@@ -1,0 +1,51 @@
+# data_config
+data:
+  mode: "MON"                             # 数据场景
+  name: "MON"                             # 数据集名称
+  root: "data/MON"                       # 数据存储路径
+  num_classes: 4                          # 类别数量
+  batch_size: 16                          # 批量大小
+  num_workers: 0                          # 数据加载线程数
+  shuffle: True                           # 是否打乱数据
+  train_ratio: 1.0                        # 训练集比例
+  img_size: [128, 128]                    # 输入尺寸 [通道, 高, 宽]
+  is_aug: True                            # 是否采用数据增强
+
+# model_config
+model:
+  backbone: "resnet18"                     # 识别模型主干
+  pretrained: False                        # 是否使用预训练权重
+  output_layer: "fc"                       # 输出层
+  d_model: 128                             # 中间特征长度
+
+  GNN:                                     # 图卷积分支
+    is_GNN: True                           # 是否采用图卷积
+    k: 4                                   # 图邻居数
+    n_blocks: 4                            # 图层数
+    n_nodes: 64                            # 图节点数
+    dropout: 0.1                           # dropout系数
+  Cross_attention:                          # 注意力融合
+    is_attention: True                      # 是否采用注意力融合
+
+# train_config 
+training:
+  epochs: 10                              # 训练轮数
+  device: "cuda"                           # 训练设备
+  checkpoint_dir: "model_ckp"              # 模型保存目录
+  optimizer:
+    type: "Adam"                             # 优化器类型
+    lr: 0.001                                # 初始学习率
+    weight_decay: 0.0001                     # 权重衰减
+    momentum: 0.9                            # 动量（SGD使用）
+
+# feature_config
+feature_combinations:                        # 优选组合特征（数量不定）
+    - get_spatial_feat
+    - get_statis_feat
+    - get_time_freq_feat
+
+# 预留接口
+# 结构搜索
+is_nas:  False
+# 高效训练损失
+is_ssl:  False

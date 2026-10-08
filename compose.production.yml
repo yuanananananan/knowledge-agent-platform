@@ -1,0 +1,154 @@
+# 文件用途：生产部署覆盖配置，只暴露统一 HTTPS 入口，隐藏数据库和内部服务端口。
+services:
+  mysql:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env.production 配置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env.production 配置 MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --transaction-isolation=READ-COMMITTED
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=100
+
+  redis:
+    ports: !reset []
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:?请配置 REDIS_PASSWORD}
+
+  kafka:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+      KAFKA_LOG_RETENTION_HOURS: "24"
+      KAFKA_LOG_SEGMENT_BYTES: "134217728"
+
+  rag-cache:
+    ports: !reset []
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${RAG_CACHE_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${RAG_CACHE_REDIS_PASSWORD:?请配置 RAG_CACHE_REDIS_PASSWORD}
+
+  opensearch:
+    ports: !reset []
+    restart: unless-stopped
+
+  bootstrap:
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?请配置 SECRET_KEY}
+      SESSION_COOKIE_SECURE: "true"
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:?请配置 CONTROL_PLANE_AUTH_SECRET}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:?请配置 CONTROL_PLANE_INTERNAL_TOKEN}
+      BOOTSTRAP_ADMIN_ACCOUNT: ${BOOTSTRAP_ADMIN_ACCOUNT:?请配置 BOOTSTRAP_ADMIN_ACCOUNT}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-系统管理员}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?请配置 BOOTSTRAP_ADMIN_PASSWORD}
+      RAG_CORPUS_PATH: /app/rag_knowledge_base
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+
+  worker:
+    restart: unless-stopped
+    command: ["celery", "-A", "app.utils.run_celery_worker.celery_app", "worker", "--pool=threads", "--concurrency=1", "--loglevel=info", "--queues=training,validation,nas,evaluation"]
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?请配置 SECRET_KEY}
+      RAG_CORPUS_PATH: /app/rag_knowledge_base
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+
+  agent-grpc:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?请配置 SECRET_KEY}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:?请配置 CONTROL_PLANE_INTERNAL_TOKEN}
+      AGENT_GRPC_MAX_WORKERS: "2"
+      RAG_CORPUS_PATH: /app/rag_knowledge_base
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./model_ckp:/app/model_ckp
+      - ./rag_knowledge_base:/app/rag_knowledge_base:ro
+
+  control-plane:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:?请配置 CONTROL_PLANE_AUTH_SECRET}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:?请配置 CONTROL_PLANE_INTERNAL_TOKEN}
+      CONTROL_PLANE_WORKER_CONCURRENCY: "2"
+
+  business-api:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_AUTH_SECRET: ${CONTROL_PLANE_AUTH_SECRET:?请配置 CONTROL_PLANE_AUTH_SECRET}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:?请配置 CONTROL_PLANE_INTERNAL_TOKEN}
+      FRONTEND_ORIGIN: https://${APP_DOMAIN:?请配置 APP_DOMAIN}
+      SESSION_COOKIE_SECURE: "true"
+      ALLOW_PUBLIC_REGISTRATION: "false"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # 实验配置属于代码配置，不含实验数据；生产演示保留配置编辑和读取能力。
+      - ./configs:/app/configs:ro
+      - ./evals:/app/evals:ro
+
+  frontend:
+    ports: !reset []
+    restart: unless-stopped
+    build:
+      args:
+        VITE_API_BASE_URL: https://${APP_DOMAIN:?请配置 APP_DOMAIN}
+        VITE_API_TIMEOUT: ${VITE_API_TIMEOUT:-30000}
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?请配置 APP_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?请配置 ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_started
+      business-api:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

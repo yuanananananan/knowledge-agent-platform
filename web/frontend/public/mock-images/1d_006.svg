@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+  <rect width="100%" height="100%" fill="#111827"/>
+  <g stroke="#a78bfa" stroke-width="4" fill="none">
+    <path d="M0 420 C 80 380, 120 420, 200 380 S 320 420, 400 380 S 520 420, 600 380 S 720 420, 800 380"/>
+  </g>
+  <g stroke="#60a5fa" stroke-width="3" fill="none" opacity="0.8">
+    <path d="M0 260 C 80 220, 120 260, 200 220 S 320 260, 400 220 S 520 260, 600 220 S 720 260, 800 220"/>
+  </g>
+  <text x="50%" y="90%" dominant-baseline="middle" text-anchor="middle" font-size="36" fill="#e2e8f0" font-family="Arial, Helvetica, sans-serif">1D 006</text>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+  <rect width="100%" height="100%" fill="#052e2b"/>
+  <g stroke="#34d399" stroke-width="6" opacity="0.8">
+    <polyline points="0,520 120,480 240,500 360,420 480,460 600,380 720,420 800,360" fill="none"/>
+    <polyline points="0,400 100,360 220,300 340,340 460,300 580,320 700,260 800,280" fill="none" stroke="#22d3ee"/>
+  </g>
+  <text x="50%" y="15%" dominant-baseline="middle" text-anchor="middle" font-size="40" fill="#a7f3d0" font-family="Arial, Helvetica, sans-serif">SAR 006</text>
+</svg>

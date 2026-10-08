@@ -1,0 +1,6 @@
+go 1.25.10
+
+use (
+	./services/go-business-api
+	./services/go-control-plane
+)

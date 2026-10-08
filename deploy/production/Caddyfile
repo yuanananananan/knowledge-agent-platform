@@ -1,0 +1,28 @@
+# 文件用途：统一提供 HTTPS、前端静态页面和后端 API 反向代理。
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	@api path /api/* /health /readyz
+	handle @api {
+		reverse_proxy business-api:8080 {
+			# SSE 流式响应立即转发，不在代理层聚合。
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+}
